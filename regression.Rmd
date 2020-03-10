@@ -1,0 +1,471 @@
+# Load Librarys
+
+```{r}
+library(tidyverse)  
+library(tidymodels) 
+library(naniar)     # vis_miss 
+library(janitor)    # rename colnames to under score
+library(furrr)      # parallel 
+library(rlang)      # expression
+library(earth)      # modeling mars
+library(xgboost)    # modeling xgboost
+library(lightgbm)   # modeling lgbm
+library(Matrix)     # modeling lgbm
+library(tictoc)     # time check
+library(patchwork)  # plot
+```
+
+# Read Data 
+
+**depends on project**
+
+```{r}
+data <- diamonds
+glimpse(diamonds)
+```
+
+# EDA
+
+**depends on project**
+**or separate the scripts**
+
+```{r}
+# vis_miss(data)
+```
+
+
+
+# Split the Data and CV Data
+
+```{r}
+set.seed(7777)
+splits <- data %>% initial_split(prop = 0.8)
+
+train <- training(splits)
+test <- testing(splits)
+
+data_cv <- train %>% vfold_cv(v = 5) 
+  
+```
+
+# Recipes (Preprocessing)
+
+```{r}
+# set the target_var, formura, and recipes
+target_var <- sym("carat")
+formula <- expr(formula(!!target_var ~.))
+
+rec <-
+  data %>% 
+  recipe(formula = formula) %>% 
+  step_ordinalscore(cut, color, clarity) 
+
+rec_preped <- 
+  rec %>%
+  prep()
+```
+
+
+# No Parameter Tuning
+
+## Prepare the Model
+
+```{r}
+# # Logistic regression 
+# logit_tune <- 
+#   logistic_reg(penalty = tune(), 
+#                mixture = tune()) %>%
+#   set_engine("glmnet")
+# 
+# # Hyperparameter grid
+# logit_grid <- logit_tune_pra %>%
+#   parameters() %>%
+#   grid_max_entropy(size = 5)
+# 
+# # Workflow bundling every step 
+# logit_wflow <- workflow() %>%
+#   add_recipe(rec) %>%
+#   add_model(logit_tune_pra)
+
+# random forest
+tune_rf <- 
+  rand_forest() %>%
+  set_engine("ranger") %>%
+  set_mode("regression")
+
+wflow_rf <-
+  workflow() %>%
+  add_recipe(rec) %>%
+  add_model(tune_rf)
+
+# mars model
+tune_mars <-
+  mars() %>%
+  set_engine("earth") %>%
+  set_mode("regression")
+
+wflow_mars <-
+  workflow() %>%
+  add_recipe(rec) %>%
+  add_model(tune_mars)
+
+#boosted trees
+tune_xgb <- 
+  boost_tree() %>%
+  set_engine("xgboost") %>%
+  set_mode("regression")
+
+wflow_xgb <- 
+  workflow() %>%
+  add_recipe(rec) %>%
+  add_model(tune_xgb)
+
+#neural nets
+tune_keras <- 
+  mlp() %>%
+  set_engine("keras") %>%
+  set_mode("regression")
+
+wflow_keras <-
+  workflow() %>%
+  add_recipe(rec) %>%
+  add_model(tune_keras)
+```
+
+## Soro model
+
+### xgboost
+
+```{r}
+# fitting
+fit_xgb <- fit(wflow_xgb, train)
+
+# predict test, and pred to the column
+res_xgb <- 
+  test %>% 
+  bake(rec_preped, new_data = .) %>% 
+  tidypredict::tidypredict_to_column(df = ., fit_xgb$fit$fit$fit)
+
+my_plot <- function(fit_boost, res_boost){
+  
+  # feature importance
+  ifelse(any(class(fit_boost) == "lgb.Booster"),
+         vi <- fit_boost %>%
+           lgb.importance() %>%
+           xgb.ggplot.importance() +
+           theme(legend.position = "none"),
+         vi <- fit_boost$fit$fit$fit %>%
+           xgb.importance(model = .) %>% 
+           xgb.ggplot.importance() +
+           theme(legend.position = "none")
+         )
+
+  hi <- res_boost %>% 
+    pivot_longer(cols = c(target_var, fit),
+                 names_to = "pred_truth",
+                 values_to = "value") %>% 
+    ggplot(aes(value)) +
+    geom_histogram() +
+    facet_wrap(vars(pred_truth))
+  
+  sc <- res_boost %>% 
+    ggplot(aes(!!target_var, fit)) +
+    geom_point()
+  
+  a <- (vi | (hi / sc))
+  return(a)
+}
+
+my_plot(fit_xgb, res_xgb)
+```
+
+### lightGBM
+
+```{r}
+
+create_lgb_train_data <- function(target_var, rec_preped, test){
+  # set target label
+  target <- 
+    rec_preped %>%
+    juice() %>% 
+    pull(target_var)
+# create dgc matrics
+  lgb_train_mat <- 
+    rec_preped %>%
+    juice() %>% 
+    select(-target_var) %>% 
+    as.matrix() %>% 
+    Matrix(sparse = TRUE) 
+
+  # lgb_data
+  lgb_data <- lgb.Dataset(data = lgb_train_mat, label = target)
+  
+  lgb_test_mat <- 
+    test %>%
+    bake(rec_preped, new_data = .) %>% 
+    select(-target_var) %>% 
+    as.matrix() %>% 
+    Matrix(sparse = TRUE)
+  
+  cat("target, lgb_train_mat, lgb_data, and lgb_test_mat are created \n")
+  
+  return(list(target = target,
+              lgb_train_mat = lgb_train_mat,
+              lgb_data = lgb_data,
+              lgb_test_mat = lgb_test_mat))
+  
+}
+
+lgb_dataset <- create_lgb_train_data(target_var = target_var, rec_preped = rec_preped, test = test)
+```
+
+```{r objとmetricを決める}
+objective <- "regression"
+metric <- "rmse"
+# ついでにコアの数も
+num_threads <- parallel::detectCores(logical = F) 
+params <- list(objective = objective, metric = metric, num_threads = num_threads)
+
+tic()
+fit_lgb <- 
+  lgb.train(
+    params = params,
+    data = lgb_dataset$lgb_data
+  )
+toc()
+```
+     
+```{r}
+res_lgb <-
+  test %>% 
+  bind_cols(
+    fit = predict(fit_lgb, lgb_dataset$lgb_test_mat) 
+  )
+
+my_plot(fit_lgb, res_lgb)
+```
+
+
+```{r}
+bind_rows(
+res_xgb %>% metrics(carat, fit) %>% mutate(boost = "xgb"),
+res_lgb %>% metrics(carat, fit) %>% mutate(boost = "lgb")
+) %>% 
+  arrange(.metric)
+```
+
+
+## Cross Validation
+
+### Create Wflow List
+
+```{r}
+wflow_list_no_tuning <-
+  list(rf = wflow_rf, mars = wflow_mars)
+```
+
+### Modeling by No Tuning CV
+
+```{r}
+plan(multiprocess)
+fit_cv_no_tuning <- function(wflow_list_no_tuning){
+  tic("fitting time is")
+  fitted_resamples_no_tuning <-
+    future_map(.x = wflow_list_no_tuning,
+               .f = ~fit_resamples(object = .x,
+                                   data_cv, 
+                                   control = control_resamples(save_pred = TRUE)))
+  toc()
+  
+  metrices <-
+    fitted_resamples_no_tuning %>% 
+    map(collect_metrics) 
+  preds <-
+    fitted_resamples_no_tuning %>% 
+    map(collect_predictions)
+  
+  return(list(fit = fitted_resamples_no_tuning,
+              metrices = metrices,
+              preds = preds))
+  
+  cat("\nfit, metrices, and preds are returned\n")
+}
+
+fitted_no_tuning <-
+  fit_cv_no_tuning(wflow_list_no_tuning)
+
+fitted_no_tuning
+```
+
+# Tuning 
+
+## Prepare the Models (tuning)
+
+```{r}
+# Logistic regression 
+tune_logit <- 
+  logistic_reg(penalty = tune(), 
+               mixture = tune()) %>%
+  set_engine("glmnet")
+
+# Hyperparameter grid
+grid_logit <-
+  tune_logit %>%
+  parameters() %>%
+  grid_max_entropy(size = 5)
+
+# Workflow bundling every step 
+wflow_logit <- 
+  workflow() %>%
+  add_recipe(rec) %>%
+  add_model(tune_logit)
+
+# random forest
+tune_rf <- 
+  rand_forest(mtry = tune(), 
+              trees = tune()) %>%
+  set_engine("ranger") %>%
+  set_mode("regression")
+
+grid_rf <- 
+  tune_rf %>%
+  parameters() %>%
+  finalize(select(data, -target_var)) %>%  
+  grid_max_entropy(size = 5)
+
+wflow_rf <-
+  workflow() %>%
+  add_recipe(rec) %>%
+  add_model(tune_rf)
+
+# mars model
+tune_mars <-
+  mars(num_terms = tune(), 
+       prod_degree = 2,
+       prune_method = tune()) %>%
+  set_engine("earth") %>%
+  set_mode("regression")
+
+grid_mars <- 
+  tune_mars %>%
+  parameters() %>%
+  grid_max_entropy(size = 5)
+
+wflow_mars <-
+  workflow() %>%
+  add_recipe(rec) %>%
+  add_model(tune_mars)
+
+#boosted trees
+tune_xgb <- 
+  boost_tree(mtry = tune(), 
+             tree = tune(),
+             learn_rate = tune(),
+             tree_depth = tune()) %>%
+  set_engine("xgboost") %>%
+  set_mode("regression")
+
+grid_xgb <- tune_xgb %>%
+  parameters() %>%
+  finalize(select(data, -target_var)) %>%
+  grid_max_entropy(size = 5)
+
+wflow_xgb <- 
+  workflow() %>%
+  add_recipe(rec) %>%
+  add_model(tune_xgb)
+
+#neural nets
+tune_keras <- 
+  mlp(hidden_units = tune(), 
+      penalty = tune(),
+      activation = "relu") %>%
+  set_engine("keras") %>%
+  set_mode("regression")
+
+grid_keras <- 
+  tune_keras %>%
+  parameters() %>%
+  grid_max_entropy(size = 5)
+
+wflow_keras <- 
+  workflow() %>%
+  add_recipe(rec) %>%
+  add_model(tune_keras)
+```
+
+```{r}
+# チューニングするｃｖ　時間かかるから並列をする後述
+# tuned_model <- tune_grid(model_wflow,
+#                          resamples = my_cv_splits,
+#                          grid = my_grid,
+#                          control = control_resamples(save_pred = TRUE))
+```
+
+## Create Wflow List (tuning)
+
+```{r}
+wflow_list_tuning <-
+  list(rf = wflow_rf, mars = wflow_mars)
+```
+
+## Modeling by Tuning CV
+
+```{r}
+plan(multiprocess)
+fit_cv_tuning <- function(wflow_list_tuning){
+  tic("fitting time is")
+  fitted_resamples_tuning <-
+    future_map(.x = wflow_list_tuning,
+               .f = ~fit_resamples(object = .x,
+                                   data_cv, 
+                                   control = control_resamples(save_pred = TRUE)))
+  toc()
+  
+  metrices <-
+    fitted_resamples_tuning %>% 
+    map(collect_metrics) 
+  preds <-
+    fitted_resamples_tuning %>% 
+    map(collect_predictions)
+  
+  return(list(fit = fitted_resamples_tuning,
+              metrices = metrices,
+              preds = preds))
+  
+  cat("\nfit, metrices, and preds are returned\n")
+}
+
+fitted_tuning <-
+  fit_cv_no_tuning(wflow_list_tuning)
+
+fitted_tuning
+```
+
+
+
+```{r}
+saveRDS(trained_models_list, "tmp.rds")
+```
+
+```{r}
+trained_models_list <- readRDS("tmp.rds")
+```
+
+
+```{r}
+show_best(trained_models_list[[1]], metric = "rmse")
+map(trained_models_list, show_best, metric = "rmse", maximize = FALSE)
+show_best(fitted_resamples, metric = "rmse")
+```
+
+```{r}
+map(trained_models_list, collect_metrics)
+map(trained_models_list, collect_predictions)
+data$carat %>% qplot
+trained_models_list[[1]] %>% collect_predictions() %>% pull(.pred) %>% qplot
+trained_models_list[[2]] %>% collect_predictions() %>% pull(.pred) %>% qplot
+fitted_resamples %>% collect_predictions() %>% pull(.pred) %>% qplot
+```
+
+
