@@ -71,9 +71,7 @@ rec <-
   recipe(formula = formula) %>%
   step_ordinalscore(cut, color, clarity)
 
-rec_preped <-
-  rec %>%
-  prep()
+rec_preped <- prep(rec)
 ```
 
 
@@ -89,21 +87,11 @@ model_lm <-
   set_engine("lm") %>%
   set_mode(mode_reg_or_clas) # %>% translate()
 
-wflow_lm <-
-  workflow() %>% 
-  add_recipe(rec) %>%
-  add_model(model_lm) 
-
 # random forest
 model_rf <-
   rand_forest() %>% 
   set_engine("ranger") %>%
   set_mode(mode_reg_or_clas) 
-
-wflow_rf <- 
-  workflow() %>% 
-  add_recipe(rec) %>% 
-  add_model(model_rf)
 
 # mars model
 model_mars <-
@@ -111,21 +99,11 @@ model_mars <-
   set_engine("earth") %>% 
   set_mode(mode_reg_or_clas)
 
-wflow_mars <-
-  workflow() %>% 
-  add_recipe(rec) %>%
-  add_model(model_mars)
-
 #boosted trees
 model_xgb <-
   boost_tree() %>%
   set_engine("xgboost") %>% 
   set_mode(mode_reg_or_clas)
-
-wflow_xgb <- 
-  workflow() %>% 
-  add_recipe(rec) %>%
-  add_model(model_xgb)
 
 #neural nets
 model_keras <-
@@ -133,10 +111,6 @@ model_keras <-
   set_engine("keras") %>% 
   set_mode(mode_reg_or_clas)
 
-wflow_keras <-
-  workflow() %>%
-  add_recipe(rec) %>%
-  add_model(model_keras)
 ```
 
 ## Soro model
@@ -145,13 +119,13 @@ wflow_keras <-
 
 ```{r}
 # fitting
-fit_xgb <- fit(wflow_xgb, train)
+fit_xgb <- fit(model_xgb, formula = formula(formula), data = juice(rec_preped))
 
 # predict test, and pred to the column
 res_xgb <-
   test %>%
   bake(rec_preped, new_data = .) %>%
-  tidypredict::tidypredict_to_column(df = ., fit_xgb$fit$fit$fit)
+  tidypredict::tidypredict_to_column(df = ., fit_xgb$fit)
 ```
 
 
@@ -211,16 +185,16 @@ bind_rows(
 ### Create Wflow List
 
 ```{r}
-wflow_list_no_tuning <-
-  list(lm = wflow_lm, rf = wflow_rf)
+model_list_no_tuning <-
+  list(lm = model_lm, rf = model_rf)
 ```
 
 ### Modeling by No Tuning CV
 
 ```{r}
-# plan(multiprocess)
-# fits_no_tuning <- fit_cv_no_tuning(wflow_list_no_tuning)
-# fits_no_tuning
+plan(multiprocess)
+fits_no_tuning <- fit_cv_no_tuning(model_list_no_tuning)
+fits_no_tuning
 ```
 
 # Tuning 
@@ -241,12 +215,6 @@ grid_lm <-
   parameters() %>%
   grid_max_entropy(size = 5)
 
-# Workflow bundling every step
-wflow_lm <-
-  workflow() %>%
-  add_recipe(rec) %>%
-  add_model(tune_lm)
-
 # random forest
 tune_rf <- model_rf %>%
   update(mtry = tune(),
@@ -257,11 +225,6 @@ grid_rf <-
   parameters() %>%
   finalize(select(data, -target_var)) %>%
   grid_max_entropy(size = 5)
-
-wflow_rf <-
-  workflow() %>%
-  add_recipe(rec) %>%
-  add_model(tune_rf)
 
 # mars model
 tune_mars <- model_mars %>%
@@ -275,11 +238,6 @@ grid_mars <-
   tune_mars %>%
   parameters() %>%
   grid_max_entropy(size = 5)
-
-wflow_mars <-
-  workflow() %>%
-  add_recipe(rec) %>%
-  add_model(tune_mars)
 
 #boosted trees
 tune_xgb <- model_xgb %>%
@@ -296,11 +254,6 @@ grid_xgb <- tune_xgb %>%
   finalize(select(data, -target_var)) %>%
   grid_max_entropy(size = 5)
 
-wflow_xgb <-
-  workflow() %>%
-  add_recipe(rec) %>%
-  add_model(tune_xgb)
-
 #neural nets
 tune_keras <- model_keras %>%
   update(hidden_units = tune(),
@@ -312,36 +265,33 @@ grid_keras <-
   parameters() %>%
   grid_max_entropy(size = 5)
 
-wflow_keras <-
-  workflow() %>%
-  add_recipe(rec) %>%
-  add_model(tune_keras)
 ```
 
 
-## Create Wflow and Grid List  (tuning)
+## Create Model and Grid List  (tuning)
 
 ```{r}
-wflow_list_tuning <-
-  list(lm = wflow_lm, rf = wflow_rf, mars = wflow_mars, xgb = wflow_xgb)
+model_list_tuning <-
+  list(lm = tune_lm, rf = tune_rf, mars = tune_mars, xgb = tune_xgb)
 grid_list <-
   list(lm = grid_lm, rf = grid_rf, mars = grid_mars, xgb = grid_xgb)
-wflow_list_tuning
+model_list_tuning
 grid_list
 ```
 
 ## Modeling by Tuning CV
 
 ```{r}
-# plan(multiprocess)
-# fits_tuning <- fit_cv_tuning(wflow_list_tuning, grid_list)
-# fits_tuning
+plan(multiprocess)
+
+fits_tuning <- fit_cv_tuning(model_list_tuning, grid_list)
+fits_tuning
 ```
 
 
 ```{r}
-# fits_no_tuning$fit %>% map(collect_metrics)
-# fits_no_tuning$fit %>% map(collect_predictions)
+fits_no_tuning$fit %>% map(collect_metrics)
+fits_no_tuning$fit %>% map(collect_predictions)
 ```
 
 ```{r}
@@ -374,38 +324,29 @@ best_tune_xgb <- tune_xgb %>% update(best_param_list$xgb)
 
 ```
 
-## Prepare the Models (Refit)
+## Create Model List  (best params)
 
 ```{r}
-wflow_lm <- workflow() %>% add_recipe(rec) %>% add_model(best_tune_lm)
-wflow_rf <- workflow() %>% add_recipe(rec) %>% add_model(best_tune_rf)
-wflow_mars <- workflow() %>% add_recipe(rec) %>% add_model(best_tune_mars)
-wflow_xgb <- workflow() %>% add_recipe(rec) %>% add_model(best_tune_xgb)
-# wflow_keras <- workflow() %>% add_recipe(rec) %>% add_model(best_tune_keras)
-```
-
-## Create Wflow List  (best params)
-
-```{r}
-wflow_list_best <-
-  list(lm = wflow_lm, rf = wflow_rf, mars = wflow_mars, xgb = wflow_xgb)
+model_list_best_params <-
+  list(lm = best_tune_lm, rf = best_tune_rf, mars = best_tune_mars, xgb = best_tune_xgb)
 ```
 
 ## Final Modeling by Best Params 
 
 ```{r}
-fit_final_model <- function(wflow, data){
-  fits <- fit(wflow, data = data)
-  return(fits$fit)
+
+fit_final_model <- function(model, rec_preped){
+  fits <- fit(model, formula = formula(formula), data = juice(rec_preped))
+  return(fits)
 }
 
 plan(multiprocess)
 fits_final <-
-  wflow_list_best %>% 
+  model_list_best_params %>% 
     future_map(
       ~fit_final_model(
-        wflow = .x,
-        data = train
+        .x,
+        rec_preped = rec_preped
         )
       )
 ```
@@ -417,8 +358,12 @@ baked_test <-
   test %>% 
   bake(rec_preped, new_data = .)
 
-preds_list <- fits_final %>% map(~predict(object = .x$fit, select(baked_test, -target_var)))
+preds_list <- 
+  fits_final[2:4] %>%
+  map(predict, baked_test %>% select(-carat)) 
+
 preds_d <- preds_list %>% bind_cols() 
+
 colnames(preds_d) <- paste0("pred_", names(preds_list))
 
 baked_test <- baked_test %>% bind_cols(preds_d) 

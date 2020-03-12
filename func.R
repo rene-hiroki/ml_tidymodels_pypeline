@@ -26,7 +26,7 @@ my_importance_plot <- function(fit_boost, res_boost) {
       xgb.ggplot.importance() +
       theme(legend.position = "none") +
       labs(title = "lgb: Feature importance"),
-    vi <- fit_boost$fit$fit$fit %>%
+    vi <- fit_boost$fit %>%
       xgb.importance(model = .) %>%
       xgb.ggplot.importance() +
       theme(legend.position = "none") +
@@ -95,14 +95,15 @@ create_lgb_dataset <- function(target_var, rec_preped, test) {
 
 # fit cv no tuning --------------------------------------------------------
 
-fit_cv_no_tuning <- function(wflow_list_no_tuning) {
+fit_cv_no_tuning <- function(model_list_no_tuning) {
   tic.clear()
   tic("fitting time is")
   fits <-
     future_map(
-      .x = wflow_list_no_tuning,
+      .x = model_list_no_tuning,
       .f = ~ fit_resamples(
-        object = .x,
+        rec,
+        .x,
         data_cv,
         control = control_resamples(save_pred = TRUE)
       )
@@ -110,8 +111,8 @@ fit_cv_no_tuning <- function(wflow_list_no_tuning) {
   t <- toc()
   time <- t$toc - t$tic
   tic.clear()
-
-    
+  
+  
   return(list(
     fits = fits,
     time = paste0("fitting time is: ", time)
@@ -123,17 +124,19 @@ fit_cv_no_tuning <- function(wflow_list_no_tuning) {
 }
 
 
+
 # fit cv tuning -----------------------------------------------------------
 
-fit_cv_tuning <- function(wflow_list_tuning, grid_list) {
+fit_cv_tuning <- function(model_list_tuning, grid_list) {
   tic.clear()
   tic("fitting time is")
   fits <-
     future_map2(
-      .x = wflow_list_tuning,
+      .x = model_list_tuning,
       .y = grid_list,
       .f = ~ tune_grid(
-        object = .x,
+        rec,
+        .x,
         resamples = data_cv,
         grid = .y,
         control = control_resamples(save_pred = TRUE)
@@ -151,7 +154,6 @@ fit_cv_tuning <- function(wflow_list_tuning, grid_list) {
   cat("\nfits is returned\n")
   cat("\nfitting time is: ", time, "\n")
 }
-
 
 
 # plot test to confirm ----------------------------------------------------
