@@ -82,6 +82,7 @@ rec_preped <-
 ## Prepare the Model
 
 ```{r}
+
 # linear regression
 model_lm <-
   linear_reg() %>% 
