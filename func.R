@@ -152,3 +152,27 @@ fit_cv_tuning <- function(wflow_list_tuning, grid_list) {
   cat("\nfitting time is: ", time, "\n")
 }
 
+
+
+# plot test to confirm ----------------------------------------------------
+
+my_test_confirm_plot <- function(pred_model) {
+  
+  hi <- baked_test %>%
+    pivot_longer(
+      cols = c(target_var, pred_model),
+      names_to = "pred_truth",
+      values_to = "value"
+    ) %>%
+    ggplot(aes(value)) +
+    geom_histogram() +
+    facet_grid(vars(pred_truth))
+  
+  sc <-  baked_test %>%
+    ggplot(aes(!!target_var, .data[[pred_model]])) +
+    geom_point()
+  
+  a <- ((hi | sc))
+  return(a)
+}
+
