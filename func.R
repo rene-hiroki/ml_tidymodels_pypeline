@@ -178,3 +178,52 @@ my_test_confirm_plot <- function(pred_model) {
   return(a)
 }
 
+
+
+# for classification
+
+
+# threshold_f1score all ---------------------------------------------------------------
+
+threshold_f1score_all <-
+  function(baked_test, lo, hi) {
+    res <- tibble()
+    for (thre in seq(lo, hi, 0.01)) {
+      tmp <-
+        baked_test %>%
+        select(target_var, contains("pred_")) %>%
+        pivot_longer(-target_var,
+                     names_to = "model",
+                     values_to = "prob") %>%
+        group_by(model) %>%
+        mutate(truth = !!target_var,
+               pred = ifelse(prob >= thre, "WS", "PS")) %>%
+        mutate(pred = as.factor(pred)) %>%
+        f_meas(truth, pred) %>%
+        mutate(threshold = thre) %>%
+        rename(f1_score = .estimate)
+      res <- tmp %>% bind_rows(res)
+    }
+    
+    adjust_thre <-
+      res %>%
+      group_by(model) %>%
+      arrange(threshold) %>%
+      distinct() %>%
+      arrange(desc(f1_score)) %>%
+      distinct(model, .keep_all = TRUE)
+    
+    p <- res %>%
+      ggplot(aes(x = threshold, y = f1_score, color = model)) +
+      geom_point() +
+      labs(title = paste0("all models: threshold vs f1_score")) +
+      scale_x_continuous(n.breaks = 10)
+    
+    cat("\n res_f1, adjusted_threshold, and roc_plot are returned. \n")
+    
+    return(list(
+      res_f1 = res,
+      adjusted_threshold = adjust_thre,
+      roc_plot = p
+    ))
+  }

@@ -1,0 +1,618 @@
+# Description
+
+encoding: utf-8
+press "ctrl + shift + o (windows)" to show document outline
+press "alt + o" to collapse all
+press "alt + shift + o" to expand all
+
+# Load Librarys
+
+```{r}
+library(tidyverse)
+library(tidymodels)
+library(naniar)     # vis_miss
+library(janitor)    # rename colnames to under score
+library(furrr)      # parallel
+library(rlang)      # expression
+library(earth)      # modeling mars
+library(xgboost)    # modeling xgboost
+library(lightgbm)   # modeling lgbm
+library(Matrix)     # modeling lgbm
+library(tictoc)     # time check
+library(patchwork)  # plot
+library(AUC)        # roc auc
+library(caret)      # confusion matrix
+source("func.R")
+```
+
+# Read Data 
+
+**depends on project**
+
+```{r}
+library(tune)
+library(kernlab)
+
+# Load data
+load(url("http://bit.ly/seg-data"))
+
+segmentationData <-
+  segmentationData %>%
+  select(-Case, -Cell, -contains("Centroid"))
+data <- segmentationData
+glimpse(data)
+```
+
+# EDA
+
+**depends on project**
+**or separate the scripts**
+
+```{r}
+# vis_miss(data)
+```
+
+
+
+# Split the Data and CV Data
+
+```{r}
+set.seed(7777)
+splits <- data %>% initial_split(prop = 0.8, strata = Class)
+
+train <- training(splits)
+test <- testing(splits)
+
+data_cv <- train %>% vfold_cv(v = 5) 
+```
+
+# Recipes (Preprocessing)
+
+```{r}
+# set target_var
+target_var <- sym("Class")
+# set estimate type
+mode_reg_or_clas <- "classification"
+# set formura
+formula <- expr(formula(!!target_var ~ .))
+# set recipes
+data %>% glimpse()
+rec <-
+  data %>%
+  recipe(formula = formula) %>%
+  step_YeoJohnson(-Class) %>%
+  step_normalize(-Class) %>%
+  step_downsample(Class) 
+ 
+rec_preped <- prep(rec)
+```
+
+# No Parameter Tuning
+
+## Prepare the Model
+
+```{r}
+# Logistic regression
+model_logit <- 
+  logistic_reg() %>%
+  set_engine("glmnet") %>% 
+  set_mode(mode_reg_or_clas)
+
+# svm
+model_svm <-
+  svm_rbf() %>%
+  set_engine("kernlab") %>% 
+  set_mode(mode_reg_or_clas)
+
+# random forest
+model_rf <-
+  rand_forest() %>% 
+  set_engine("ranger") %>%
+  set_mode(mode_reg_or_clas) 
+
+# mars model
+model_mars <-
+  mars() %>% 
+  set_engine("earth") %>% 
+  set_mode(mode_reg_or_clas)
+
+#boosted trees
+model_xgb <-
+  boost_tree() %>%
+  set_engine("xgboost", ) %>% 
+  set_mode(mode_reg_or_clas)
+
+#neural nets
+model_keras <-
+  mlp() %>%
+  set_engine("keras") %>% 
+  set_mode(mode_reg_or_clas)
+
+```
+
+## Soro model
+
+### xgboost
+
+```{r}
+# fitting
+fit_xgb <- fit(model_xgb, formula = formula(formula), data = juice(rec_preped))
+
+# predict test, and pred to the column
+res_xgb <-
+  predict(fit_xgb, bake(rec_preped, test), type = "prob") %>% 
+  bind_cols(bake(rec_preped, test))
+```
+
+
+### lightGBM
+
+```{r}
+lgb_dataset <-
+  create_lgb_dataset(target_var = target_var,
+                     rec_preped = rec_preped,
+                     test = test)
+params <-
+  list(
+    eta = 0.05, 
+    max_depth = 6, 
+    num_leaves = 31,
+    colsample_bytree = 0.3,
+    objective = "binary", 
+    metric = "auc"
+    )
+```
+
+```{r}
+tic()
+fit_lgb <-
+  lgb.train(params = params,
+            data = lgb_dataset$lgb_data)
+toc()
+
+res_lgb <-
+  test %>%
+  bind_cols(fit = predict(fit_lgb, lgb_dataset$lgb_test_mat)) 
+
+res_lgb %>% select(target_var, fit)
+
+```
+
+### ROC Curve
+
+```{r}
+res_xgb %>% roc_curve(res_xgb,truth = target_var) 
+function(res_fit){
+  
+}
+tmp_auc <- res_xgb %>% roc_auc(Class, .pred_WS) %>% pull(.estimate)
+
+r <- roc(res_xgb$.pred_WS, res_xgb[[target_var]])
+td <- tidy(r)
+td
+ggplot(td, aes(fpr, tpr)) +
+  geom_line() + 
+  labs(title = paste0("xgb roc   auc is:",  tmp_auc))
+roc_curve(two_class_example, truth, Class1)
+autoplot(roc_curve(two_class_example, truth, Class1)) 
+# Same as above, but will all of the resamples
+hpc_cv %>%
+  group_by(Resample) %>%
+  roc_curve(obs, VF:L) %>%
+  autoplot()
+
+```
+
+### Adjust Threshold
+
+```{r}
+thre_f1 <- tibble(threshold = seq(0.01, 0.9, 0.01))
+thre_f1$f1_score <- 0 
+for (i in 1:nrow(thre_f1)) {
+  thre <- thre_f1$threshold[i]
+  tmp <-
+    res_xgb %>% mutate(truth = Class,
+                       pred = ifelse(.pred_WS > thre, "WS", "PS")) %>%
+    mutate(pred = as.factor(pred))
+  f_tmp <- f_meas(tmp, truth, pred)
+  
+  thre_f1$f1_score[i] <- f_tmp$.estimate
+}
+
+adjust_thre <- thre_f1 %>% distinct() %>% arrange(desc(f1_score)) %>% head(1) %>% pull(threshold)
+
+thre_f1 <- thre_f1 %>% distinct() %>% arrange(desc(f1_score)) 
+thre_f1$tmp_max <- c("max", rep("no",nrow(thre_f1)-1) )
+thre_f1 %>%
+  ggplot(aes(x = threshold, y = f1_score, color = tmp_max)) +
+  geom_point(aes(no ="black")) +
+  geom_vline(xintercept = adjust_thre) +
+  labs(title = paste0("adjusted threshold for miximize f1_score is: ", adjust_thre))
+```
+
+
+### Confusion metrics (xgb and lgb)
+
+
+```{r}
+res_xgb <- res_xgb %>%
+  mutate(pred = ifelse(.pred_WS > adjust_thre, "WS", "PS")) %>% 
+  mutate(pred = as.factor(pred)) 
+confusionMatrix(res_xgb$pred, res_xgb$Class, positive = "PS") 
+```
+
+**maybe return to EDA and preprocessing**
+
+## Cross Validation
+
+### Create Model List
+
+```{r}
+model_list_no_tuning <-
+  list(svm = model_svm, rf = model_rf, mars = model_mars, xgb = model_xgb)
+```
+
+### Modeling by No Tuning CV
+
+```{r}
+plan(multiprocess)
+fits_no_tuning <- fit_cv_no_tuning(model_list_no_tuning)
+fits_no_tuning
+```
+
+### Result no tuning cv
+
+```{r}
+# metric by threshold 0.5 default
+fits_no_tuning$fits %>% map(collect_metrics)
+```
+
+```{r}
+# predict by adjusted threshold
+fits_no_tuning$fits_adjust <-
+  fits_no_tuning$fits %>% 
+  map(collect_predictions) %>% 
+  map(mutate, pred_adjust_thre = ifelse(.pred_WS > adjust_thre, "WS", "PS")) %>% 
+  map(mutate, pred_adjust_thre = as.factor(pred_adjust_thre)) 
+
+# metric by adjusted threshold
+fits_no_tuning$fits_adjust %>% 
+  map(group_by, id) %>% 
+  map(metrics, Class, pred_adjust_thre, .pred_WS) %>% 
+  map(group_by, .metric, .estimator) %>% 
+  map(summarise, mean = mean(.estimate),
+                 n = n(),
+                 std_err = sd(.estimate)) %>% 
+  map(filter, .metric %in% c("accuracy", "roc_auc"))
+```
+
+# Tuning 
+
+## Prepare the Models (tuning)
+
+```{r}
+size = 5
+rec <-
+  data %>%
+  recipe(formula = formula) %>%
+  step_YeoJohnson(-!!target_var) %>%
+  step_normalize(-!!target_var) %>%
+  step_downsample(!!target_var) 
+
+# Logistic regression
+tune_logit <- model_logit %>% 
+  update(penalty = tune(), 
+         mixture = tune())
+
+grid_logit <- tune_logit %>%
+  parameters() %>%
+  grid_max_entropy(size = size)
+
+# svm
+tune_svm <- model_svm %>% 
+  update(cost = tune(),
+         rbf_sigma = tune())
+
+grid_svm <- tune_svm %>% 
+  parameters() %>% 
+  grid_max_entropy(size = size)
+
+# random forest
+tune_rf <- model_rf %>%
+  update(mtry = tune(),
+         trees = tune())
+
+grid_rf <-
+  tune_rf %>%
+  parameters() %>%
+  finalize(select(data, -target_var)) %>%
+  grid_max_entropy(size = size)
+
+# mars model
+tune_mars <- model_mars %>%
+  update(
+    num_terms = tune(),
+    prod_degree = 2,
+    prune_method = tune()
+  )
+
+grid_mars <-
+  tune_mars %>%
+  parameters() %>%
+  grid_max_entropy(size = size)
+
+#boosted trees
+tune_xgb <- model_xgb %>%
+  update(
+    mtry = tune(),
+    tree = tune(),
+    min_n = tune(),
+    learn_rate = tune(),
+    tree_depth = tune()
+  )
+
+grid_xgb <- tune_xgb %>%
+  parameters() %>%
+  finalize(select(data, -target_var)) %>%
+  grid_max_entropy(size = size)
+
+#neural nets
+tune_keras <- model_keras %>%
+  update(hidden_units = tune(),
+         penalty = tune(),
+         activation = "relu")
+
+grid_keras <-
+  tune_keras %>%
+  parameters() %>%
+  grid_max_entropy(size = size)
+
+```
+
+
+## Create Model and Grid List  (tuning)
+
+```{r}
+model_list_tuning <-
+  list(logit = tune_logit, svm = tune_svm, rf = tune_rf, mars = tune_mars, xgb = tune_xgb)
+grid_list <-
+  list(logit = grid_logit, svm = grid_svm, rf = grid_rf, mars = grid_mars, xgb = grid_xgb)
+model_list_tuning
+grid_list
+```
+
+## Modeling by Tuning CV
+
+```{r}
+plan(multiprocess)
+
+fits_tuning <- fit_cv_tuning(model_list_tuning, grid_list)
+fits_tuning
+```
+
+```{r}
+# set.seed(1291)
+# search_res <- 
+#   tune_bayes(
+#     svm_wflow, 
+#     resamples = folds,
+#     # To use non-default parameter ranges
+#     param_info = svm_set,
+#     # Generate five at semi-random to start
+#     initial = 3,
+#     iter = 30,
+#     # How to measure performance?
+#     metrics = metric_set(roc_auc),
+#     control = control_bayes(no_improve = 20, verbose = TRUE)
+#   )
+```
+
+## Result tuning cv
+
+```{r}
+fits_tuning$fit %>% map(collect_metrics) %>%  map(arrange,.metric, desc(mean))
+```
+
+```{r}
+fits_tuning$fit %>% map(collect_predictions)
+```
+
+```{r}
+fits_tuning$fit %>% map(show_best, metric = "roc_auc", maximize = TRUE, n = 3)
+```
+
+
+# Refit by Best Params
+
+## Update Models to Best Params
+
+```{r}
+best_param_list <-
+  fits_tuning$fit %>% 
+    map(show_best, metric = "roc_auc", maximize = TRUE, n = 1) %>% 
+    map(select, -c(".metric", ".estimator", "mean", "n", "std_err"))
+
+best_tune_logit <- tune_logit %>% update(best_param_list$logit)
+best_tune_svm <- tune_svm %>% update(best_param_list$svm)
+best_tune_rf <- tune_rf %>% update(best_param_list$rf)
+best_tune_mars <- tune_mars %>% update(best_param_list$mars)
+best_tune_xgb <- tune_xgb %>% update(best_param_list$xgb)
+
+```
+
+## Create Model List  (best params)
+
+```{r}
+model_list_best_params <-
+  list(logit = best_tune_logit, svm = best_tune_svm, rf = best_tune_rf, mars = best_tune_mars, xgb = best_tune_xgb)
+```
+
+## Final Modeling by Best Params 
+
+```{r}
+fit_final_model <- function(model, rec_preped){
+  fits <- fit(model, formula = formula(formula), data = juice(rec_preped))
+  return(fits)
+}
+
+tmp <- fit(model_list_best_params$logit, formula = formula(formula), data = juice(rec_preped))
+class(tmp$fit)
+plan(multiprocess)
+fits_final <-
+  model_list_best_params %>% 
+    future_map(
+      ~fit_final_model(
+        .x,
+        rec_preped = rec_preped
+        )
+      )
+```
+
+## Predict by best params
+
+```{r}
+preds_list <- 
+  fits_final %>%
+  map(~predict(
+    object = .x, new_data = rec_preped %>% juice(),
+    type = "prob"
+  ))
+
+preds_d <- preds_list %>% bind_cols() %>% select(contains("WS"))
+colnames(preds_d) <- paste0("pred_WS_", names(preds_list))
+
+preds_d <- juice(rec_preped) %>% bind_cols(preds_d) 
+```
+
+## ROC Curve
+
+```{r}
+preds_d %>% 
+  select(target_var, contains("pred_WS")) %>% 
+  pivot_longer(-target_var,
+               names_to = "model",
+               values_to = "prob") %>% 
+  group_by(model) %>% 
+  roc_curve(!!target_var, prob) %>% 
+  autoplot() +
+  labs(title = "ROC Curve")
+```
+
+## Adjust Threshold 
+
+```{r}
+thre_f1_all <- threshold_f1score_all(preds_d, lo = 0.05, hi = 0.9)
+thre_f1_all
+```
+
+
+
+## Confusion metrics 
+
+
+```{r}
+d <- preds_d %>%
+  select(target_var, contains("pred")) %>%
+  pivot_longer(-target_var,
+               names_to = "model",
+               values_to = "prob") %>%
+  left_join(thre_f1_all$adjusted_threshold %>%
+              select(f1_score, threshold, model),
+            by = "model") %>%
+  group_nest(model) %>%
+  mutate(pred_data = map(data,
+                         mutate,
+                         pred = ifelse(prob >= threshold, "WS", "PS"),
+                         pred = as.factor(pred))) 
+
+names(d$pred_data) <- d$model
+confusion_matrix_all <-
+  d$pred_data %>% map(.x = .,
+                      ~ confusionMatrix(.x$pred, .x$Class, positive = "WS") %>% tidy)
+confusion_matrix_all %>% 
+  bind_rows() %>% 
+  mutate(model = rep(names(confusion_matrix_all), 
+                     each = nrow(confusion_matrix_all[[1]]))) %>% 
+  arrange(term, estimate)
+```
+
+
+# Predict Test
+
+```{r}
+baked_test <- 
+  test %>% 
+  bake(rec_preped, new_data = .)
+
+preds_list <- 
+  fits_final %>%
+  map(~predict(
+    object = ., new_data = baked_test %>% select(-target_var),
+    type = "prob"
+  ))
+
+preds_d <- preds_list %>% bind_cols() %>% select(contains("WS"))
+colnames(preds_d) <- paste0("pred_WS_", names(preds_list))
+
+preds_d <- baked_test %>% bind_cols(preds_d) 
+preds_d
+
+```
+
+### ROC Curve (test)
+
+```{r}
+preds_d %>% 
+  select(target_var, contains("pred_WS")) %>% 
+  pivot_longer(-target_var,
+               names_to = "model",
+               values_to = "prob") %>% 
+  group_by(model) %>% 
+  roc_curve(!!target_var, prob) %>% 
+  autoplot() +
+  labs(title = "ROC Curve")
+```
+
+
+
+### Confusion metrics (test)
+
+
+```{r}
+d <- preds_d %>%
+  select(target_var, contains("pred")) %>%
+  pivot_longer(-target_var,
+               names_to = "model",
+               values_to = "prob") %>%
+  left_join(thre_f1_all$adjusted_threshold %>%
+              select(f1_score, threshold, model),
+            by = "model") %>%
+  group_nest(model) %>%
+  mutate(pred_data = map(data,
+                         mutate,
+                         pred = ifelse(prob >= threshold, "WS", "PS"),
+                         pred = as.factor(pred))) 
+
+names(d$pred_data) <- d$model
+confusion_matrix_all <-
+  d$pred_data %>% map(.x = .,
+                      ~ confusionMatrix(.x$pred, .x$Class, positive = "WS") %>% tidy)
+confusion_matrix_all %>% 
+  bind_rows() %>% 
+  mutate(model = rep(names(confusion_matrix_all), 
+                     each = nrow(confusion_matrix_all[[1]]))) %>% 
+  arrange(term, estimate)
+
+
+```
+
+
+# Final test (submit)
+
+
+```{r}
+saveRDS(fits_tuning, "fits_tuning.rds")
+saveRDS(fits_best_params, "fits_best_params.rds")
+```
+
+
