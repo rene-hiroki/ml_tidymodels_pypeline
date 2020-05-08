@@ -25,26 +25,21 @@ my_importance_plot <- function(fit_boost, res_boost) {
       lgb.importance() %>%
       xgb.ggplot.importance() +
       theme(legend.position = "none") +
-      labs(title = "lgb: Feature importance"),
+      labs(title = "lightGBM"),
     vi <- fit_boost$fit %>%
       xgb.importance(model = .) %>%
       xgb.ggplot.importance() +
       theme(legend.position = "none") +
-      labs(title = "xgb: Feature importance")
+      labs(title = "XGBoost")
   )
   
   hi <- res_boost %>%
-    pivot_longer(
-      cols = c(target_var, fit),
-      names_to = "pred_truth",
-      values_to = "value"
-    ) %>%
-    ggplot(aes(value)) +
-    geom_histogram() +
-    facet_wrap(vars(pred_truth))
-  
+    pivot_longer(everything()) %>% 
+    ggplot(aes(x = value, fill = name)) +
+    geom_histogram(alpha = 0.5)
+
   sc <- res_boost %>%
-    ggplot(aes(!!target_var, fit)) +
+    ggplot(aes(!!target_var, .pred)) +
     geom_point()
   
   a <- (vi | (hi / sc))
@@ -52,71 +47,55 @@ my_importance_plot <- function(fit_boost, res_boost) {
 }
 
 
-# lgb data set ------------------------------------------------------------
+# create_lgb_dataset ------------------------------------------------------------
 
 
-create_lgb_dataset <- function(target_var, rec_preped, test) {
+create_lgb_dataset <- function(target_var, rec_preped, data) {
   # set target label
   target <-
     rec_preped %>%
-    juice() %>%
+    bake(data) %>% 
     pull(target_var)
   # create dgc matrics
-  lgb_train_mat <-
+  train_mat <-
     rec_preped %>%
-    juice() %>%
+    bake(data) %>% 
     select(-target_var) %>%
     as.matrix() %>%
     Matrix(sparse = TRUE)
   
-  # lgb_data
-  lgb_data <- lgb.Dataset(data = lgb_train_mat, label = target)
+  # lgb data
+  lgb_data <- lgb.Dataset(data = train_mat, label = target)
   
-  lgb_test_mat <-
-    test %>%
-    bake(rec_preped, new_data = .) %>%
-    select(-target_var) %>%
-    as.matrix() %>%
-    Matrix(sparse = TRUE)
+  cat("matrix and lgb_data are created \n")
   
-  cat("target, lgb_train_mat, lgb_data, and lgb_test_mat are created \n")
-  
-  return(
-    list(
-      target = target,
-      lgb_train_mat = lgb_train_mat,
-      lgb_data = lgb_data,
-      lgb_test_mat = lgb_test_mat
-    )
-  )
+  return(list(mat = train_mat,
+              data = lgb_data))
   
 }
 
 
 # fit cv no tuning --------------------------------------------------------
 
-fit_cv_no_tuning <- function(model_list_no_tuning) {
+fit_cv <- function(model_list) {
   tic.clear()
   tic("fitting time is")
   fits <-
     future_map(
-      .x = model_list_no_tuning,
+      .x = model_list,
       .f = ~ fit_resamples(
-        rec,
-        .x,
-        data_cv,
+        object = rec,
+        model = .x,
+        resamples = data_cv,
         control = control_resamples(save_pred = TRUE)
       )
     )
   t <- toc()
   time <- t$toc - t$tic
   tic.clear()
-  
-  
-  return(list(
-    fits = fits,
-    time = paste0("fitting time is: ", time)
-  ))
+
+  return(list(fits = fits,
+              time = paste0("fitting time is: ", time)))
   
   cat("\nfits is returned\n")
   cat("\nfitting time is: ", time, "\n")
@@ -212,7 +191,7 @@ roc_curve_and_auc <- function(res_models) {
 threshold_f1score <-
   function(res_fit, lo=0.5, hi=0.95) {
     res <- tibble()
-    for (thre in seq(lo, hi, 0.01)) {
+    for (thre in seq(lo, hi, 0.005)) {
       tmp <-
         res_fit %>%
         select(target_var, contains(paste0("pred_", positive))) %>%
@@ -221,7 +200,7 @@ threshold_f1score <-
                      values_to = "prob") %>%
         group_by(model) %>%
         mutate(truth = !!target_var,
-               pred = ifelse(prob >= thre, "WS", "PS")) %>%
+               pred = ifelse(prob >= thre, positive, negative)) %>%
         mutate(pred = as.factor(pred)) %>%
         f_meas(truth, pred) %>%
         mutate(threshold = thre) %>%
@@ -270,7 +249,7 @@ threshold_f1score_all <-
                      values_to = "prob") %>%
         group_by(model) %>%
         mutate(truth = !!target_var,
-               pred = ifelse(prob >= thre, "WS", "PS")) %>%
+               pred = ifelse(prob >= thre, positive, negative)) %>%
         mutate(pred = as.factor(pred)) %>%
         f_meas(truth, pred) %>%
         mutate(threshold = thre) %>%
@@ -371,3 +350,24 @@ confusion_matrix_info <-
 wrapper_add_title <- function(p, model_names){
   p + labs(title = model_names)
 }
+
+
+# predict by fixex threshold -------------------------------------------
+
+predict_by_fixed_threshold <-
+  function(res_models, fixed_thre) {
+    res <-
+      map(.x = res_models,
+          ~ mutate(
+            .x,
+            pred = ifelse(
+              !!pred_positive >= fixed_thre,
+              positive,
+              negative
+            ),
+            pred = as.factor(pred)
+          ))
+    cat("\n add pred column to the data by using adjusted threshold\n")
+    return(res)
+  }
+

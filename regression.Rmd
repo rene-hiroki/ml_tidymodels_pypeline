@@ -1,11 +1,10 @@
-# Description
+## Description
 
-encoding: utf-8
 press "ctrl + shift + o (windows)" to show document outline
 press "alt + o" to collapse all
 press "alt + shift + o" to expand all
 
-# Load Librarys
+## Load Librarys
 
 ```{r}
 library(tidyverse)
@@ -23,7 +22,7 @@ library(patchwork)  # plot
 source("func.R")
 ```
 
-# Read Data 
+## Read Data 
 
 **depends on project**
 
@@ -32,7 +31,7 @@ data <- diamonds
 glimpse(diamonds)
 ```
 
-# EDA
+## EDA
 
 **depends on project**
 **or separate the scripts**
@@ -43,7 +42,7 @@ glimpse(diamonds)
 
 
 
-# Split the Data and CV Data
+## Split the Data and CV Data
 
 ```{r}
 set.seed(7777)
@@ -56,15 +55,49 @@ data_cv <- train %>% vfold_cv(v = 5)
   
 ```
 
-# Recipes (Preprocessing)
+## Recipes (Preprocessing)
+
+```{r recipes list, eval=FALSE, include=FALSE}
+# step_inverse() #逆変換
+# step_log()
+# step_sqrt()
+# step_logit()
+# step_invlogit()
+# step_BoxCox()
+# step_YeoJohnson() # boxcox の改良版
+# step_relu() # NNでよく使う発火関数
+# step_hyperbolic() # デフォルトsin
+# step_meanimpute() # 平均で欠損補完
+# step_modeimpute() # 最頻値で欠損補完
+# step_rollimpute() # スライド窓で欠損補完、デフォルト中央値
+# step_knnimpute() # k近傍法で欠損補完
+# step_bagimpute() # 決定木のバギングで欠損補完
+# step_rm() # 名前や方に基づいて変数消去
+# step_corr() # 閾値より上の相関がある変数を片方消去
+# step_zv() # 分散が０の変数消去
+# step_nzv() # 分散が０に近い変数の消去
+# step_lincomb() # 他と線形の関係にある変数を消去
+# step_num2factor() # 数値をファクターに変換
+# step_string2factor() # 文字列をファクター
+# step_factor2string() # ファクターを文字列
+# step_ordinalscore() # 順序カテゴリを数値に
+# step_novel() # 初見のカテゴリに新しいファクター（主にテストデータ
+# step_center() # データの中心からの距離を算出（中心化）
+# step_scale() # 標準化
+# remains other step ...
+```
+
 
 ```{r}
-# set target_var
+# set target_var, sym means symbol
 target_var <- sym("carat")
+
 # set estimate type
-mode_reg_or_clas <- "regression"
+mode_reg <- "regression"
+
 # set formura
 formula <- expr(formula(!!target_var ~ .))
+
 # set recipes
 rec <-
   data %>%
@@ -72,107 +105,135 @@ rec <-
   step_ordinalscore(cut, color, clarity)
 
 rec_preped <- prep(rec)
+rec_preped %>% juice()
 ```
 
 
-# No Parameter Tuning
+## Modeling
 
-## Prepare the Model
+### Prepare the Model
+
+```{r model and engine list, eval=FALSE, include=FALSE}
+# boost_tree()    # spark, xgboost
+# decision_tree() # rpart, spark
+# linear_reg()    # glmnet, keras, lm, spark, stan
+# mars()
+# mlp()           # keras, nnet
+# nearest_neighbor()  # kknn
+# null_model()    # parsnip
+# rand_forest()   # randomForest, ranger, spark
+# surv_reg()
+# svm_poly()     # kernlab
+# svm_rbf()      # kernlab
+
+```
+
 
 ```{r}
-
 # linear regression
 model_lm <-
   linear_reg() %>% 
   set_engine("lm") %>%
-  set_mode(mode_reg_or_clas) # %>% translate()
+  set_mode(mode_reg) 
 
 # random forest
 model_rf <-
   rand_forest() %>% 
   set_engine("ranger") %>%
-  set_mode(mode_reg_or_clas) 
+  set_mode(mode_reg) 
 
 # mars model
 model_mars <-
   mars() %>% 
   set_engine("earth") %>% 
-  set_mode(mode_reg_or_clas)
+  set_mode(mode_reg)
 
 #boosted trees
 model_xgb <-
   boost_tree() %>%
   set_engine("xgboost") %>% 
-  set_mode(mode_reg_or_clas)
+  set_mode(mode_reg)
 
 #neural nets
 model_keras <-
   mlp() %>%
   set_engine("keras") %>% 
-  set_mode(mode_reg_or_clas)
+  set_mode(mode_reg)
 
+model_list <-
+  list(
+    lm = model_lm,
+    rf = model_rf,
+    mars = model_mars,
+    xgb = model_xgb,
+    nnet = model_keras
+  )
+# model summary
+model_list %>% map(translate)
 ```
 
-## Soro model
+### Soro model
 
-### xgboost
+#### XGBoost
 
 ```{r}
 # fitting
-fit_xgb <- fit(model_xgb, formula = formula(formula), data = juice(rec_preped))
+fit_xgb <- fit(model_list$xgb, formula = formula(formula), data = juice(rec_preped))
 
-# predict test, and pred to the column
+# predict train
 res_xgb <-
-  test %>%
-  bake(rec_preped, new_data = .) %>%
-  tidypredict::tidypredict_to_column(df = ., fit_xgb$fit)
+  train %>% 
+  bake(rec_preped, new_data = .) %>% 
+  predict(fit_xgb, new_data = .) %>% 
+  bind_cols(train %>% select(target_var))
+
+res_xgb
 ```
 
 
-### lightGBM
+#### lightGBM
 
 ```{r}
-lgb_dataset <-
+# create lgb data set
+lgb_train_data <-
   create_lgb_dataset(target_var = target_var,
                      rec_preped = rec_preped,
-                     test = test)
+                     data = train)
+
+# set lgb params
 params <-
   list(objective = "regression",
        metric = "rmse")
-
 ```
 
 ```{r}
+# fit
 tic()
 fit_lgb <-
   lgb.train(params = params,
-            data = lgb_dataset$lgb_data)
+            data = lgb_train_data$data)
 toc()
+# predict
+res_lgb <-
+  tibble(.pred = predict(fit_lgb, lgb_dataset$mat)) %>%
+  bind_cols(train %>% select(target_var))
+
 ```
 
-#### feature importance (xgb)
+#### feature importance
 
 ```{r}
 my_importance_plot(fit_xgb, res_xgb)
-```
-
-     
-#### feature importance (lgb)
-
-```{r}
-res_lgb <-
-  test %>%
-  bind_cols(fit = predict(fit_lgb, lgb_dataset$lgb_test_mat))
-
 my_importance_plot(fit_lgb, res_lgb)
+
 ```
 
-### metric (xgb and lgb)
+#### metric
 
 ```{r}
 bind_rows(
-  res_xgb %>% metrics(carat, fit) %>% mutate(boost = "xgb"),
-  res_lgb %>% metrics(carat, fit) %>% mutate(boost = "lgb")
+  res_xgb %>% metrics(carat, .pred) %>% mutate(boost = "xgb"),
+  res_lgb %>% metrics(carat, .pred) %>% mutate(boost = "lgb")
 ) %>%
   arrange(.metric) %>% 
   select(-.estimator)
@@ -180,26 +241,26 @@ bind_rows(
 
 **maybe return to EDA and preprocessing**
 
-## Cross Validation
-
-### Create Wflow List
+### Cross Validation
 
 ```{r}
-model_list_no_tuning <-
-  list(lm = model_lm, rf = model_rf)
+# plan(multiprocess)
+# select cv model
+cv_model <- c("lm", "xgb")
+res_cv <- fit_cv(model_list[cv_model])
+res_cv
 ```
 
-### Modeling by No Tuning CV
+### CV Result
 
 ```{r}
-plan(multiprocess)
-fits_no_tuning <- fit_cv_no_tuning(model_list_no_tuning)
-fits_no_tuning
+res_cv$fits %>% map(collect_metrics) %>% map2(cv_model, ~mutate(.x, method = .y)) %>% bind_rows()
+res_cv$fits %>% map(collect_predictions)
 ```
 
-# Tuning 
+## Tuning 
 
-## Prepare the Models (tuning)
+### Prepare the Models (tuning)
 
 ```{r}
 # linear regression (lasso)
@@ -207,7 +268,7 @@ tune_lm <-
   linear_reg(penalty = tune(),
              mixture = 1) %>%
   set_engine("glmnet") %>%
-  set_mode(mode_reg_or_clas)
+  set_mode(mode_reg)
 
 # Hyperparameter grid
 grid_lm <-
@@ -268,7 +329,7 @@ grid_keras <-
 ```
 
 
-## Create Model and Grid List  (tuning)
+### Create Model and Grid List  (tuning)
 
 ```{r}
 model_list_tuning <-
@@ -279,7 +340,7 @@ model_list_tuning
 grid_list
 ```
 
-## Modeling by Tuning CV
+### Modeling by Tuning CV
 
 ```{r}
 plan(multiprocess)
@@ -307,9 +368,9 @@ fits_tuning$fit %>% map(show_best, metric = "rmse", maximize = FALSE, n = 3)
 ```
 
 
-# Refit by Best Params
+## Refit by Best Params
 
-## Update Models to Best Params
+### Update Models to Best Params
 
 ```{r}
 best_param_list <-
@@ -324,14 +385,14 @@ best_tune_xgb <- tune_xgb %>% update(best_param_list$xgb)
 
 ```
 
-## Create Model List  (best params)
+### Create Model List  (best params)
 
 ```{r}
 model_list_best_params <-
   list(lm = best_tune_lm, rf = best_tune_rf, mars = best_tune_mars, xgb = best_tune_xgb)
 ```
 
-## Final Modeling by Best Params 
+### Final Modeling by Best Params 
 
 ```{r}
 
@@ -351,7 +412,7 @@ fits_final <-
       )
 ```
 
-# Predict Test
+## Predict Test
 
 ```{r}
 baked_test <- 
@@ -370,12 +431,12 @@ baked_test <- baked_test %>% bind_cols(preds_d)
 baked_test
 ```
 
-## plot
+### plot
 ```{r}
 colnames(preds_d) %>% map(my_test_confirm_plot)
 ```
 
-# Final test (submit)
+## Final test (submit)
 
 
 ```{r}
